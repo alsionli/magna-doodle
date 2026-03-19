@@ -5,3 +5,4 @@ node_modules/
 screenshot-*.js
 test-*.js
 verify-*.js
+.vercel
