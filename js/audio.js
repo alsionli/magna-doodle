@@ -5,8 +5,9 @@ export class AudioEngine {
     this.initialized = false;
     this._drawNoiseBuffer = null;
     this._eraseNoiseBuffer = null;
-    this._activeDrawSource = null;
-    this._activeEraseSource = null;
+    this._eraseStepBuffer = null;
+    this._eraseEndBuffer = null;
+    this._lastEraseStepTime = 0;
   }
 
   init() {
@@ -14,8 +15,9 @@ export class AudioEngine {
     try {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
       this._drawNoiseBuffer = this._createNoiseBuffer(0.08);
-      this._eraseNoiseBuffer = this._createNoiseBuffer(0.15);
+      this._eraseNoiseBuffer = this._createNoiseBuffer(0.1);
       this.initialized = true;
+      this._loadEraseSamples();
     } catch {
       console.warn('Web Audio API not available');
     }
@@ -36,6 +38,35 @@ export class AudioEngine {
       data[i] = Math.random() * 2 - 1;
     }
     return buffer;
+  }
+
+  async _loadEraseSamples() {
+    try {
+      const load = async (url) => {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Unable to load ${url}`);
+        return this.ctx.decodeAudioData(await response.arrayBuffer());
+      };
+      [this._eraseStepBuffer, this._eraseEndBuffer] = await Promise.all([
+        load('./assets/magna-slider-scrape.wav'),
+        load('./assets/magna-slider-end.wav'),
+      ]);
+    } catch {
+      // The procedural fallbacks below keep the slider audible offline.
+      console.warn('Slider audio samples unavailable; using synthesized fallback');
+    }
+  }
+
+  _connectWithPan(input, gain, pan) {
+    input.connect(gain);
+    if (typeof this.ctx.createStereoPanner === 'function') {
+      const panner = this.ctx.createStereoPanner();
+      panner.pan.value = Math.max(-0.7, Math.min(0.7, pan));
+      gain.connect(panner);
+      panner.connect(this.ctx.destination);
+      return;
+    }
+    gain.connect(this.ctx.destination);
   }
 
   playDrawSound() {
@@ -65,7 +96,6 @@ export class AudioEngine {
     this.ensureResumed();
 
     const t = this.ctx.currentTime;
-
     const osc = this.ctx.createOscillator();
     osc.type = 'triangle';
     osc.frequency.setValueAtTime(280, t);
@@ -82,45 +112,84 @@ export class AudioEngine {
   }
 
   startEraseSound() {
-    if (this.muted || !this.initialized || this._activeEraseSource) return;
+    if (this.muted || !this.initialized) return;
     this.ensureResumed();
+    this._lastEraseStepTime = 0;
+  }
+
+  playEraseStep(intensity = 0.5, pan = 0) {
+    if (this.muted || !this.initialized) return;
+    this.ensureResumed();
+
+    const t = this.ctx.currentTime;
+    if (t - this._lastEraseStepTime < 0.055) return;
+    this._lastEraseStepTime = t;
+
+    const amount = Math.max(0.2, Math.min(1, intensity));
+    if (this._eraseStepBuffer) {
+      const source = this.ctx.createBufferSource();
+      source.buffer = this._eraseStepBuffer;
+      source.playbackRate.value = 0.92 + Math.random() * 0.16;
+
+      const gain = this.ctx.createGain();
+      gain.gain.value = 0.24 + amount * 0.12;
+      this._connectWithPan(source, gain, pan);
+      source.start(t);
+      return;
+    }
 
     const source = this.ctx.createBufferSource();
     source.buffer = this._eraseNoiseBuffer;
-    source.loop = true;
+    source.playbackRate.value = 0.9 + Math.random() * 0.2;
 
     const filter = this.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 1800;
+    filter.type = 'bandpass';
+    filter.frequency.value = 1350 + amount * 450;
+    filter.Q.value = 0.65;
 
     const gain = this.ctx.createGain();
-    gain.gain.value = 0.06;
+    gain.gain.setValueAtTime(0.018 + amount * 0.014, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.075);
 
     source.connect(filter);
-    filter.connect(gain);
-    gain.connect(this.ctx.destination);
-    source.start();
+    this._connectWithPan(filter, gain, pan);
+    source.start(t, Math.random() * 0.02, 0.08);
+  }
 
-    this._activeEraseSource = source;
-    this._activeEraseGain = gain;
+  playEraseEnd(pan = 0.7) {
+    if (this.muted || !this.initialized) return;
+    this.ensureResumed();
+
+    const t = this.ctx.currentTime;
+    if (this._eraseEndBuffer) {
+      const source = this.ctx.createBufferSource();
+      source.buffer = this._eraseEndBuffer;
+      const gain = this.ctx.createGain();
+      gain.gain.value = 0.42;
+      this._connectWithPan(source, gain, pan);
+      source.start(t);
+      return;
+    }
+
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(155, t);
+    osc.frequency.exponentialRampToValueAtTime(112, t + 0.1);
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.055, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.11);
+    this._connectWithPan(osc, gain, pan);
+    osc.start(t);
+    osc.stop(t + 0.12);
   }
 
   stopEraseSound() {
-    if (!this._activeEraseSource) return;
-    try {
-      this._activeEraseGain.gain.exponentialRampToValueAtTime(
-        0.001, this.ctx.currentTime + 0.1
-      );
-      const src = this._activeEraseSource;
-      setTimeout(() => { try { src.stop(); } catch {} }, 120);
-    } catch {}
-    this._activeEraseSource = null;
-    this._activeEraseGain = null;
+    // Erase audio is distance-triggered, so there is no loop to stop.
   }
 
   toggleMute() {
     this.muted = !this.muted;
-    if (this.muted) this.stopEraseSound();
     return this.muted;
   }
 }
