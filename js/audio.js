@@ -7,7 +7,12 @@ export class AudioEngine {
     this._eraseNoiseBuffer = null;
     this._eraseStepBuffer = null;
     this._eraseEndBuffer = null;
-    this._lastEraseStepTime = 0;
+    this._eraseActive = false;
+    this._erasePulseTimer = null;
+    this._eraseCurrentIntensity = 0.5;
+    this._eraseCurrentPan = 0;
+    this._eraseLastMotionAt = 0;
+    this._samplesPromise = null;
   }
 
   init() {
@@ -17,7 +22,7 @@ export class AudioEngine {
       this._drawNoiseBuffer = this._createNoiseBuffer(0.08);
       this._eraseNoiseBuffer = this._createNoiseBuffer(0.1);
       this.initialized = true;
-      this._loadEraseSamples();
+      this._samplesPromise = this._loadEraseSamples();
     } catch {
       console.warn('Web Audio API not available');
     }
@@ -114,46 +119,41 @@ export class AudioEngine {
   startEraseSound() {
     if (this.muted || !this.initialized) return;
     this.ensureResumed();
-    this._lastEraseStepTime = 0;
+    this._eraseActive = true;
+  }
+
+  _playEraseLayer() {
+    if (!this._eraseActive || this.muted || !this._eraseStepBuffer) return;
+    if (performance.now() - this._eraseLastMotionAt > 130) return;
+
+    const source = this.ctx.createBufferSource();
+    source.buffer = this._eraseStepBuffer;
+    source.playbackRate.value = 0.98 + this._eraseCurrentIntensity * 0.03;
+
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0.105 + this._eraseCurrentIntensity * 0.025;
+    this._connectWithPan(source, gain, this._eraseCurrentPan);
+    source.start();
   }
 
   playEraseStep(intensity = 0.5, pan = 0) {
     if (this.muted || !this.initialized) return;
     this.ensureResumed();
+    this._eraseCurrentIntensity = Math.max(0.2, Math.min(1, intensity));
+    this._eraseCurrentPan = Math.max(-0.7, Math.min(0.7, pan));
+    this._eraseLastMotionAt = performance.now();
 
-    const t = this.ctx.currentTime;
-    if (t - this._lastEraseStepTime < 0.055) return;
-    this._lastEraseStepTime = t;
-
-    const amount = Math.max(0.2, Math.min(1, intensity));
-    if (this._eraseStepBuffer) {
-      const source = this.ctx.createBufferSource();
-      source.buffer = this._eraseStepBuffer;
-      source.playbackRate.value = 0.92 + Math.random() * 0.16;
-
-      const gain = this.ctx.createGain();
-      gain.gain.value = 0.24 + amount * 0.12;
-      this._connectWithPan(source, gain, pan);
-      source.start(t);
+    if (!this._eraseStepBuffer) {
+      this._samplesPromise?.then(() => {
+        if (this._eraseActive && !this._erasePulseTimer) this.playEraseStep(intensity, pan);
+      });
       return;
     }
 
-    const source = this.ctx.createBufferSource();
-    source.buffer = this._eraseNoiseBuffer;
-    source.playbackRate.value = 0.9 + Math.random() * 0.2;
-
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.value = 1350 + amount * 450;
-    filter.Q.value = 0.65;
-
-    const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(0.018 + amount * 0.014, t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.075);
-
-    source.connect(filter);
-    this._connectWithPan(filter, gain, pan);
-    source.start(t, Math.random() * 0.02, 0.08);
+    if (!this._erasePulseTimer) {
+      this._playEraseLayer();
+      this._erasePulseTimer = setInterval(() => this._playEraseLayer(), 65);
+    }
   }
 
   playEraseEnd(pan = 0.7) {
@@ -185,11 +185,14 @@ export class AudioEngine {
   }
 
   stopEraseSound() {
-    // Erase audio is distance-triggered, so there is no loop to stop.
+    this._eraseActive = false;
+    if (this._erasePulseTimer) clearInterval(this._erasePulseTimer);
+    this._erasePulseTimer = null;
   }
 
   toggleMute() {
     this.muted = !this.muted;
+    if (this.muted) this.stopEraseSound();
     return this.muted;
   }
 }

@@ -9,7 +9,6 @@ export class EraseSlider {
     this.isDragging = false;
     this.ratio = 0;
     this._handleWidth = 80;
-    this._soundDistance = 0;
     this._lastMoveTime = 0;
 
     this._onPointerDown = this._onPointerDown.bind(this);
@@ -34,7 +33,9 @@ export class EraseSlider {
       this._updatePosition();
       this.canvas.eraseToPosition(this.ratio);
       this.audio.init();
+      this.audio.startEraseSound();
       this.audio.playEraseStep(0.7, this._panForRatio(this.ratio));
+      setTimeout(() => this.audio.stopEraseSound(), 130);
     }
   }
 
@@ -45,7 +46,6 @@ export class EraseSlider {
     this.handle.classList.remove('resetting');
     this._startX = e.clientX;
     this._startRatio = this.ratio;
-    this._soundDistance = 0;
     this._lastMoveTime = performance.now();
 
     this.audio.init();
@@ -68,16 +68,14 @@ export class EraseSlider {
       const now = performance.now();
       const moved = (newRatio - this.ratio) * maxTravel;
       const elapsed = Math.max(1, now - this._lastMoveTime);
-      this._soundDistance += moved;
 
       this.ratio = newRatio;
       this._updatePosition();
       this.canvas.eraseToPosition(this.ratio);
 
-      if (this._soundDistance >= 16) {
+      if (moved > 0) {
         const speed = Math.max(0.25, Math.min(1, (moved / elapsed) / 0.6));
         this.audio.playEraseStep(speed, this._panForRatio(this.ratio));
-        this._soundDistance = 0;
       }
       this._lastMoveTime = now;
     }
